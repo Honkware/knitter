@@ -24,9 +24,10 @@ STATUS_API = "https://status.d420.de/api/v1/instances"
 DEFAULT_DB = pathlib.Path(
     os.environ.get("KNITTER_DB", pathlib.Path.home() / ".cache" / "knitter" / "knitter.db")
 )
-FALLBACK_INSTANCES = (
-    "https://nitter.mie.foundation",
-    "https://nitter.mizuki.st",
+ENV_INSTANCES = tuple(
+    u.strip().rstrip("/")
+    for u in os.environ.get("KNITTER_INSTANCES", "").split(",")
+    if u.strip()
 )
 
 INSTANCES_TTL = 3600
@@ -149,8 +150,10 @@ def _http_get(
 
 def discover_instances(store: Store) -> list[str]:
     """Return healthy RSS instances from status.d420.de ranked by score and latency."""
+    if ENV_INSTANCES:
+        return list(ENV_INSTANCES)
     if cached := store.get_kv("instances", max_age=INSTANCES_TTL):
-        return _unique(cached, FALLBACK_INSTANCES)
+        return _unique(cached)
 
     try:
         raw, _ = _http_get(STATUS_API, headers={"Accept": "application/json"})
@@ -166,11 +169,13 @@ def discover_instances(store: Store) -> list[str]:
         hosts.sort(key=lambda h: (-int(h.get("points") or 0), int(h.get("ping_avg") or 99999)))
         if urls := [h["url"].rstrip("/") for h in hosts]:
             store.set_kv("instances", urls)
-            return _unique(urls, FALLBACK_INSTANCES)
+            return _unique(urls)
     except Exception:
-        pass
+        # Fall back to stale cached discovery if status.d420.de is temporarily unreachable.
+        if stale := store.get_kv("instances"):
+            return _unique(stale)
 
-    return list(FALLBACK_INSTANCES)
+    raise RuntimeError("no RSS instances discovered; pass -i <url> or set KNITTER_INSTANCES")
 
 
 def _parse_rss(xml_bytes: bytes, instance: str, limit: int) -> list[Post]:
